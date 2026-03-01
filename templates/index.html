@@ -39,7 +39,11 @@
             </div>
             <p class="input-hint">
                 Try: <a onclick="return setTarget('scanme.nmap.org')">scanme.nmap.org</a> ·
+                {% if client_ip %}
+                <a onclick="return setTarget('{{ client_ip }}')">Scan my network ({{ client_ip }})</a>
+                {% else %}
                 Enter any website address or IP you have permission to scan.
+                {% endif %}
             </p>
         </div>
 

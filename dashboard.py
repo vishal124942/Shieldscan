@@ -6,7 +6,7 @@ import os
 import threading
 
 import nest_asyncio
-from flask import Flask, render_template, send_from_directory
+from flask import Flask, render_template, send_from_directory, request
 from flask_socketio import SocketIO, emit
 
 from scanner import (
@@ -123,7 +123,11 @@ def _run_in_thread(target, ports, concurrency, timeout):
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    # Detect client IP. Vercel/Render use X-Forwarded-For
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+    if client_ip and "," in client_ip:
+        client_ip = client_ip.split(",")[0].strip()
+    return render_template("index.html", client_ip=client_ip)
 
 
 @app.route("/screenshots/<path:filename>")
