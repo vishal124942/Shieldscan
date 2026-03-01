@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ShieldScan — Find Vulnerabilities Before Hackers Do</title>
+    <meta name="description"
+        content="ShieldScan is a free, open-source security scanner. Check any website or server for open services, known vulnerabilities, and take screenshots — all from your browser.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+</head>
+
+<body>
+
+    <header>
+        <div class="logo">
+            <span class="logo-icon">🛡️</span>
+            <h1>Shield<span class="accent">Scan</span></h1>
+        </div>
+        <p class="tagline">Check any website or server for security issues — open services, known vulnerabilities, and
+            live screenshots.</p>
+    </header>
+
+    <!-- Scan Panel -->
+    <div class="scan-panel glass">
+        <div class="input-main">
+            <label for="target">What do you want to scan?</label>
+            <div class="target-row">
+                <input type="text" id="target" placeholder="e.g. example.com or 192.168.1.1" autocomplete="off"
+                    spellcheck="false">
+                <button id="scan-btn" onclick="startScan()">
+                    <span id="btn-text">🔍 Scan Now</span>
+                </button>
+            </div>
+            <p class="input-hint">
+                Try: <a onclick="return setTarget('scanme.nmap.org')">scanme.nmap.org</a> ·
+                Enter any website address or IP you have permission to scan.
+            </p>
+        </div>
+
+        <!-- Scan Mode Cards -->
+        <div class="scan-modes">
+            <div class="mode-card glass active" data-mode="quick" onclick="selectMode(this)">
+                <span class="mode-icon">⚡</span>
+                <span class="mode-name">Quick Scan</span>
+                <span class="mode-desc">Top 25 common services · ~10 seconds</span>
+            </div>
+            <div class="mode-card glass" data-mode="full" onclick="selectMode(this)">
+                <span class="mode-icon">🔎</span>
+                <span class="mode-name">Full Scan</span>
+                <span class="mode-desc">80+ ports including databases · ~30 seconds</span>
+            </div>
+            <div class="mode-card glass" data-mode="deep" onclick="selectMode(this)">
+                <span class="mode-icon">🕵️</span>
+                <span class="mode-name">Deep Scan</span>
+                <span class="mode-desc">First 1000 ports · ~2 minutes</span>
+            </div>
+        </div>
+
+        <!-- Hidden ports field, populated by mode selection -->
+        <input type="hidden" id="ports"
+            value="21,22,23,25,53,80,110,443,993,3000,3306,5000,5900,8000,8080,8443,8888,9090">
+    </div>
+
+    <!-- Stats Row (hidden until scan starts) -->
+    <div class="stats-row" id="stats-row" style="display: none;">
+        <div class="stat-card glass">
+            <div class="stat-value" id="stat-ports">0</div>
+            <div class="stat-label">Open Services</div>
+            <div class="stat-explain">Doors that are open</div>
+        </div>
+        <div class="stat-card glass">
+            <div class="stat-value cve-color" id="stat-cves">0</div>
+            <div class="stat-label">Vulnerabilities</div>
+            <div class="stat-explain">Known security issues</div>
+        </div>
+        <div class="stat-card glass">
+            <div class="stat-value subdomain-color" id="stat-subdomains">0</div>
+            <div class="stat-label">Subdomains</div>
+            <div class="stat-explain">Related websites found</div>
+        </div>
+        <div class="stat-card glass">
+            <div class="stat-value screenshot-color" id="stat-screenshots">0</div>
+            <div class="stat-label">Screenshots</div>
+            <div class="stat-explain">Captured web pages</div>
+        </div>
+    </div>
+
+    <!-- Progress -->
+    <div class="progress-section" id="progress-section" style="display: none;">
+        <div class="progress-header">
+            <span class="progress-status" id="progress-status">Starting scan...</span>
+            <span class="progress-pct" id="progress-pct">0%</span>
+        </div>
+        <div class="progress-bar-track">
+            <div class="progress-bar-fill" id="progress-fill"></div>
+        </div>
+    </div>
+
+    <!-- Live Feed -->
+    <div class="live-feed glass" id="live-feed" style="display: none;">
+        <h2>📡 Live Activity</h2>
+        <div class="feed-container" id="feed-container"></div>
+    </div>
+
+    <!-- Results Table -->
+    <div class="results-section" id="results-section" style="display: none;">
+        <h2>🔓 Open Services Found</h2>
+        <p class="section-subtitle">These are the services running on your target that are accessible from the internet.
+        </p>
+        <div class="table-wrapper">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Host</th>
+                        <th>Port</th>
+                        <th>Service</th>
+                        <th>Software</th>
+                        <th>Web?</th>
+                        <th>Security</th>
+                    </tr>
+                </thead>
+                <tbody id="results-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- CVE Alerts -->
+    <div class="cve-section" id="cve-section" style="display: none;">
+        <h2>🚨 Vulnerabilities Detected</h2>
+        <p class="section-subtitle">These are known security issues found via the NIST National Vulnerability Database
+            using CPE matching.</p>
+        <div id="cve-alerts"></div>
+    </div>
+
+    <!-- Screenshots -->
+    <div class="screenshot-section" id="screenshot-section" style="display: none;">
+        <h2>📸 Website Screenshots</h2>
+        <p class="section-subtitle">Our scanner automatically captured what these web pages look like.</p>
+        <div class="screenshot-grid" id="screenshot-grid"></div>
+    </div>
+
+    <!-- What Is This Section -->
+    <div class="info-section glass">
+        <h2>What does ShieldScan do?</h2>
+        <div class="info-grid">
+            <div class="info-item">
+                <span class="info-icon">🚪</span>
+                <h3>Finds Open Doors</h3>
+                <p>Every server has thousands of "ports" — like doors. We check which ones are open and what's running
+                    behind them.</p>
+            </div>
+            <div class="info-item">
+                <span class="info-icon">🔍</span>
+                <h3>Checks for Vulnerabilities</h3>
+                <p>We identify the software version and cross-check it against the US government's CVE database for
+                    known security flaws.</p>
+            </div>
+            <div class="info-item">
+                <span class="info-icon">📸</span>
+                <h3>Takes Screenshots</h3>
+                <p>If we find a web interface, we capture a screenshot so you can see exactly what's publicly visible on
+                    your server.</p>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+
+</html>
