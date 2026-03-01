@@ -62,7 +62,7 @@
             <div class="mode-card glass" data-mode="deep" onclick="selectMode(this)">
                 <span class="mode-icon">🕵️</span>
                 <span class="mode-name">Deep Scan</span>
-                <span class="mode-desc">First 1000 ports · ~2 minutes</span>
+                <span class="mode-desc">All 65,535 ports · ~5 minutes</span>
             </div>
         </div>
 
@@ -140,6 +140,22 @@
         <p class="section-subtitle">These are known security issues found via the NIST National Vulnerability Database
             using CPE matching.</p>
         <div id="cve-alerts"></div>
+    </div>
+
+    <!-- Security Headers -->
+    <div class="headers-section" id="headers-section" style="display: none;">
+        <h2>🔒 Security Header Analysis</h2>
+        <p class="section-subtitle">We checked each web service for critical HTTP security headers. Missing headers =
+            easier to hack.</p>
+        <div id="header-reports"></div>
+    </div>
+
+    <!-- Routes Discovered -->
+    <div class="routes-section" id="routes-section" style="display: none;">
+        <h2>🗺️ Routes & Hidden Pages</h2>
+        <p class="section-subtitle">Discovered from robots.txt, sitemap.xml, and homepage links. Red = sensitive file
+            exposed.</p>
+        <div id="route-reports"></div>
     </div>
 
     <!-- Screenshots -->

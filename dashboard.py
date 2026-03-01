@@ -11,7 +11,7 @@ from flask_socketio import SocketIO, emit
 
 from scanner import (
     parse_ports, is_ip, enumerate_subdomains,
-    scan_port, check_cves, take_screenshot
+    scan_port, check_cves, check_security_headers, discover_routes, take_screenshot
 )
 
 nest_asyncio.apply()
@@ -23,6 +23,8 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 SCREENSHOTS_DIR = os.path.join(os.path.dirname(__file__), "screenshots")
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 
+cancel_event = threading.Event()
+
 
 # ─────────────────────────────────────────────────────────
 # Scan Orchestrator
@@ -30,6 +32,9 @@ os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 
 async def run_scan(target_domain, ports, concurrency, timeout):
     """Run the full scan pipeline and emit events to the browser."""
+
+    def stopped():
+        return cancel_event.is_set()
 
     socketio.emit("scan_status", {"status": "Resolving target..."})
 
@@ -57,6 +62,9 @@ async def run_scan(target_domain, ports, concurrency, timeout):
     tasks = [scan_port(host, port, timeout, semaphore) for host in targets for port in ports]
 
     for future in asyncio.as_completed(tasks):
+        if stopped():
+            socketio.emit("scan_stopped", {"reason": "Cancelled by user"})
+            return
         result = await future
         completed += 1
 
@@ -75,6 +83,7 @@ async def run_scan(target_domain, ports, concurrency, timeout):
                 http_services.append(f"{proto}://{result['host']}:{result['port']}")
 
     # 3. CVE Lookups
+    if stopped(): socketio.emit("scan_stopped", {"reason": "Cancelled by user"}); return
     socketio.emit("scan_status", {"status": "Checking CVE database..."})
     for result in all_open:
         if result["banner"]:
@@ -87,7 +96,27 @@ async def run_scan(target_domain, ports, concurrency, timeout):
                 })
             await asyncio.sleep(0.5)  # NVD rate limit
 
+    # 3.5 Security Header Analysis
+    if stopped(): socketio.emit("scan_stopped", {"reason": "Cancelled by user"}); return
+    header_results = []
+    if http_services:
+        socketio.emit("scan_status", {"status": f"Analyzing security headers on {len(http_services)} web services..."})
+        for url in http_services:
+            report = await check_security_headers(url)
+            header_results.append(report)
+            socketio.emit("header_report", report)
+
+    # 3.7 Route Discovery
+    if stopped(): socketio.emit("scan_stopped", {"reason": "Cancelled by user"}); return
+    if http_services:
+        socketio.emit("scan_status", {"status": f"Discovering routes on {len(http_services)} web services..."})
+        for url in http_services:
+            routes = await discover_routes(url)
+            if routes["routes"]:
+                socketio.emit("routes_found", routes)
+
     # 4. Screenshots
+    if stopped(): socketio.emit("scan_stopped", {"reason": "Cancelled by user"}); return
     screenshots = []
     if http_services:
         socketio.emit("scan_status", {"status": f"Screenshotting {len(http_services)} web services..."})
@@ -111,6 +140,7 @@ async def run_scan(target_domain, ports, concurrency, timeout):
 
 
 def _run_in_thread(target, ports, concurrency, timeout):
+    cancel_event.clear()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(run_scan(target, ports, concurrency, timeout))
@@ -139,12 +169,26 @@ def serve_screenshot(filename):
 # SocketIO Events
 # ─────────────────────────────────────────────────────────
 
+@socketio.on("stop_scan")
+def handle_stop_scan():
+    cancel_event.set()
+
+
 @socketio.on("start_scan")
 def handle_start_scan(data):
     target = data.get("target", "").strip()
     port_str = data.get("ports", "21,22,80,443,3000,5000,8000,8080,8443,9090")
-    concurrency = int(data.get("concurrency", 500))
-    timeout = float(data.get("timeout", 1.5))
+    mode = data.get("mode", "quick")
+
+    # Auto-tune: Deep scans need lower concurrency to avoid firewall blocks
+    SCAN_PROFILES = {
+        "quick": {"concurrency": 500, "timeout": 1.5},
+        "full":  {"concurrency": 400, "timeout": 2.0},
+        "deep":  {"concurrency": 200, "timeout": 2.5},
+    }
+    profile = SCAN_PROFILES.get(mode, SCAN_PROFILES["quick"])
+    concurrency = profile["concurrency"]
+    timeout = profile["timeout"]
 
     if not target:
         emit("scan_error", {"error": "No target specified"})

@@ -17,7 +17,7 @@ let scanning = false;
 const SCAN_MODES = {
     quick: "21,22,23,25,53,80,110,443,993,3000,3306,5000,5900,8000,8080,8443,8888,9090",
     full: "20,21,22,23,25,53,67,68,69,80,110,111,119,123,135,137,138,139,143,161,162,179,389,443,445,465,500,514,520,587,631,636,873,993,995,1080,1433,1434,1521,1723,2049,2082,2083,2086,2087,2095,2096,3000,3306,3389,4443,4567,5000,5432,5900,5901,6379,6667,8000,8008,8080,8443,8888,9000,9090,9200,9300,10000,11211,27017,28017",
-    deep: "1-1000"
+    deep: "1-65535"
 };
 
 // ─────────────────────────────────────────────
@@ -43,7 +43,11 @@ function setTarget(value) {
 // ─────────────────────────────────────────────
 
 function startScan() {
-    if (scanning) return;
+    if (scanning) {
+        // Stop the scan
+        socket.emit('stop_scan');
+        return;
+    }
 
     const target = document.getElementById('target').value.trim();
     const ports = document.getElementById('ports').value.trim();
@@ -60,9 +64,9 @@ function startScan() {
 
     // Reset UI
     const btn = document.getElementById('scan-btn');
-    btn.disabled = true;
+    btn.disabled = false;
     btn.classList.add('scanning');
-    document.getElementById('btn-text').textContent = 'Scanning...';
+    document.getElementById('btn-text').textContent = '■ Stop Scan';
 
     show('stats-row');
     show('progress-section');
@@ -78,14 +82,20 @@ function startScan() {
     document.getElementById('results-tbody').innerHTML = '';
     document.getElementById('cve-alerts').innerHTML = '';
     document.getElementById('screenshot-grid').innerHTML = '';
+    document.getElementById('header-reports').innerHTML = '';
+    document.getElementById('route-reports').innerHTML = '';
 
     hide('results-section');
     hide('cve-section');
     hide('screenshot-section');
+    hide('headers-section');
+    hide('routes-section');
 
     addFeedItem('info', `🚀 Starting scan on ${target}...`);
 
-    socket.emit('start_scan', { target, ports });
+    const mode = document.querySelector('.mode-card.active')?.dataset.mode || 'quick';
+
+    socket.emit('start_scan', { target, ports, mode });
 }
 
 // ─────────────────────────────────────────────
@@ -152,7 +162,11 @@ socket.on('cve_found', (data) => {
                 <span class="cve-score ${getScoreClass(cve.score)}">${cve.score}/10 ${cve.severity}</span>
             </div>
             <div class="cve-desc">${cve.description}</div>
-            <div class="cve-target">Found on: ${data.host}:${data.port} — ${data.banner}</div>
+            <div class="cve-solution"><strong>🛡️ Recommended Fix:</strong> ${cve.solution}</div>
+            <div class="cve-target">
+                <span>Found on: ${data.host}:${data.port} — ${data.banner}</span>
+                <a href="${cve.link}" target="_blank" class="cve-link">Read full NIST report ↗</a>
+            </div>
         `;
         document.getElementById('cve-alerts').appendChild(alertDiv);
 
@@ -161,6 +175,101 @@ socket.on('cve_found', (data) => {
             cell.innerHTML = `<span style="color: var(--red); font-weight: 600;">⚠ ${cveCount} found</span>`;
         }
     }
+});
+
+socket.on('header_report', (data) => {
+    show('headers-section');
+
+    addFeedItem('info', `🔒 Security headers for ${data.url}: Grade ${data.grade} (${data.passed}/${data.total} passed)`);
+
+    const card = document.createElement('div');
+    card.className = 'header-card glass';
+
+    const gradeClass = data.grade === 'A' ? 'grade-a' : data.grade === 'B' ? 'grade-b' :
+        data.grade === 'C' ? 'grade-c' : 'grade-f';
+
+    let findingsHTML = '';
+    for (const f of data.findings) {
+        if (f.status === 'present') {
+            findingsHTML += `
+                <div class="header-finding header-pass">
+                    <span class="header-check">✓</span>
+                    <span class="header-name">${f.header}</span>
+                    <span class="header-value">${f.value || ''}</span>
+                </div>`;
+        } else if (f.status === 'warning') {
+            findingsHTML += `
+                <div class="header-finding header-warn">
+                    <span class="header-check">⚠</span>
+                    <div>
+                        <span class="header-name">${f.header}</span>
+                        <p class="header-desc">${f.description}</p>
+                        <p class="header-fix">🛡️ ${f.fix}</p>
+                    </div>
+                </div>`;
+        } else {
+            findingsHTML += `
+                <div class="header-finding header-fail">
+                    <span class="header-check">✗</span>
+                    <div>
+                        <span class="header-name">${f.header}</span>
+                        <span class="header-sev sev-${f.severity.toLowerCase()}">${f.severity}</span>
+                        <p class="header-desc">${f.description}</p>
+                        <p class="header-fix">🛡️ ${f.fix}</p>
+                    </div>
+                </div>`;
+        }
+    }
+
+    card.innerHTML = `
+        <div class="header-card-top">
+            <div>
+                <div class="header-url">${data.url}</div>
+                <div class="header-score-text">${data.passed}/${data.total} headers present</div>
+            </div>
+            <div class="header-grade ${gradeClass}">${data.grade}</div>
+        </div>
+        <div class="header-findings">${findingsHTML}</div>
+    `;
+    document.getElementById('header-reports').appendChild(card);
+});
+
+socket.on('routes_found', (data) => {
+    show('routes-section');
+
+    const src = data.sources || {};
+    addFeedItem('info', `🗺️ ${data.url}: Found ${data.routes.length} routes (robots: ${src.robots || 0}, sitemap: ${src.sitemap || 0}, crawl: ${src.crawl || 0})`);
+
+    const card = document.createElement('div');
+    card.className = 'route-card glass';
+
+    let routesHTML = '';
+    for (const r of data.routes) {
+        const riskClass = r.risk === 'danger' ? 'route-danger' :
+            r.risk === 'warning' ? 'route-warning' : 'route-ok';
+        const statusBadge = r.status === 200 ? '200 OK' :
+            r.status === 301 ? '301 →' :
+                r.status === 302 ? '302 →' :
+                    r.status === 403 ? '403 Forbidden' : r.status;
+        const sourceTag = r.source === 'sensitive_probe' ? '🔴 sensitive' : '🔵 discovered';
+
+        routesHTML += `
+            <div class="route-row ${riskClass}">
+                <span class="route-status">${statusBadge}</span>
+                <a href="${data.url.replace(/\/$/, '')}${r.path}" target="_blank" class="route-path">${r.path}</a>
+                <span class="route-source">${sourceTag}</span>
+                ${r.redirect ? `<span class="route-redirect">→ ${r.redirect}</span>` : ''}
+            </div>`;
+    }
+
+    card.innerHTML = `
+        <div class="route-card-top">
+            <div class="route-url">${data.url}</div>
+            <div class="route-stats">${data.routes.length} found / ${data.total_checked} checked</div>
+        </div>
+        <div class="route-rows">${routesHTML}</div>
+    `;
+    document.getElementById('route-reports').appendChild(card);
 });
 
 socket.on('screenshot_taken', (data) => {
@@ -197,6 +306,16 @@ socket.on('scan_complete', (data) => {
     });
 
     addFeedItem('info', `✅ Done — ${data.total_open} open services, ${data.total_cves} vulnerabilities found`);
+});
+
+socket.on('scan_stopped', () => {
+    scanning = false;
+    const btn = document.getElementById('scan-btn');
+    btn.disabled = false;
+    btn.classList.remove('scanning');
+    document.getElementById('btn-text').textContent = 'Scan Now';
+    document.getElementById('progress-status').textContent = '⏹ Scan cancelled';
+    addFeedItem('info', '⏹ Scan stopped by user');
 });
 
 socket.on('scan_error', (data) => {

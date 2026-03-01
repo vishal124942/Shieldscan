@@ -1,24 +1,10 @@
-#!/usr/bin/env python3
-"""
-scanner.py — Core Scanning Engine
-==================================
-All reusable logic lives here. Both the CLI and web dashboard import from this module.
-
-Capabilities:
-  - Async port scanning with dynamic banner grabbing
-  - Subdomain enumeration via crt.sh
-  - Real CVE lookups via NVD API (dynamic CPE resolution, zero hardcoding)
-  - Headless browser screenshots via Playwright
-"""
 
 import asyncio
 import socket
 import re
 from typing import List, Dict, Any
-
 import aiohttp
 from playwright.async_api import async_playwright
-
 
 # ─────────────────────────────────────────────────────────
 # Utilities
@@ -241,16 +227,288 @@ async def check_cves(banner: str) -> List[Dict]:
                             severity = cvss[0].get("cvssData", {}).get("baseSeverity", "N/A")
 
                         desc = next(
-                            (d["value"][:120] for d in cve.get("descriptions", []) if d.get("lang") == "en"),
-                            ""
+                            (d["value"] for d in cve.get("descriptions", []) if d.get("lang") == "en"),
+                            "No description available."
                         )
-                        cves.append({
-                            "id": cve.get("id", "?"), "score": score,
-                            "severity": severity, "description": desc, "cpe": cpe
-                        })
+                        # Only report HIGH (7.0+) and CRITICAL vulnerabilities
+                        if score >= 7.0:
+                            cves.append({
+                                "id": cve.get("id", "?"), "score": score,
+                                "severity": severity, "description": desc, "cpe": cpe,
+                                "solution": f"Update {product} to the latest stable version.",
+                                "link": f"https://nvd.nist.gov/vuln/detail/{cve.get('id', '?')}"
+                            })
     except Exception:
         pass
     return cves
+
+
+
+# ─────────────────────────────────────────────────────────
+# HTTP Security Header Analysis
+# ─────────────────────────────────────────────────────────
+
+SECURITY_HEADERS = [
+    {
+        "header": "Strict-Transport-Security",
+        "severity": "HIGH",
+        "missing_desc": "No HTTPS enforcement — traffic can be intercepted by attackers on public Wi-Fi.",
+        "fix": "Add header: Strict-Transport-Security: max-age=31536000; includeSubDomains"
+    },
+    {
+        "header": "Content-Security-Policy",
+        "severity": "HIGH",
+        "missing_desc": "No XSS protection — attackers can inject malicious scripts into your pages.",
+        "fix": "Add header: Content-Security-Policy: default-src 'self'; script-src 'self'"
+    },
+    {
+        "header": "X-Frame-Options",
+        "severity": "MEDIUM",
+        "missing_desc": "Clickjacking possible — your site can be embedded in a hidden iframe to trick users.",
+        "fix": "Add header: X-Frame-Options: DENY"
+    },
+    {
+        "header": "X-Content-Type-Options",
+        "severity": "MEDIUM",
+        "missing_desc": "MIME sniffing allowed — browsers may misinterpret files, enabling attacks.",
+        "fix": "Add header: X-Content-Type-Options: nosniff"
+    },
+    {
+        "header": "Referrer-Policy",
+        "severity": "LOW",
+        "missing_desc": "Full URL leaked to third-party sites when users click links, exposing private paths.",
+        "fix": "Add header: Referrer-Policy: strict-origin-when-cross-origin"
+    },
+    {
+        "header": "Permissions-Policy",
+        "severity": "LOW",
+        "missing_desc": "No restrictions on browser features — scripts can access camera, microphone, geolocation.",
+        "fix": "Add header: Permissions-Policy: camera=(), microphone=(), geolocation=()"
+    },
+]
+
+
+async def check_security_headers(url: str) -> Dict[str, Any]:
+    """
+    Analyze HTTP response headers for security best practices.
+    Returns a grade (A-F) and a list of missing/present headers.
+    """
+    findings = []
+    passed = 0
+    total = len(SECURITY_HEADERS)
+    raw_headers = {}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8),
+                                   allow_redirects=True, ssl=False) as resp:
+                raw_headers = dict(resp.headers)
+
+                for check in SECURITY_HEADERS:
+                    header_val = resp.headers.get(check["header"])
+                    if header_val:
+                        passed += 1
+                        findings.append({
+                            "header": check["header"],
+                            "status": "present",
+                            "value": header_val[:100],
+                            "severity": check["severity"],
+                        })
+                    else:
+                        findings.append({
+                            "header": check["header"],
+                            "status": "missing",
+                            "severity": check["severity"],
+                            "description": check["missing_desc"],
+                            "fix": check["fix"],
+                        })
+
+                # Check for risky headers that SHOULD be hidden
+                server_val = resp.headers.get("Server", "")
+                if server_val and any(c.isdigit() for c in server_val):
+                    findings.append({
+                        "header": "Server",
+                        "status": "warning",
+                        "severity": "MEDIUM",
+                        "value": server_val,
+                        "description": f"Server version exposed: '{server_val}' — helps attackers pick the right exploit.",
+                        "fix": "Hide version info. Nginx: server_tokens off; Apache: ServerTokens Prod",
+                    })
+
+    except Exception:
+        return {"url": url, "grade": "?", "findings": [], "passed": 0, "total": total}
+
+    # Calculate grade
+    ratio = passed / total if total else 0
+    if ratio >= 0.9:
+        grade = "A"
+    elif ratio >= 0.7:
+        grade = "B"
+    elif ratio >= 0.5:
+        grade = "C"
+    elif ratio >= 0.3:
+        grade = "D"
+    else:
+        grade = "F"
+
+    return {
+        "url": url, "grade": grade, "findings": findings,
+        "passed": passed, "total": total,
+    }
+
+
+# ─────────────────────────────────────────────────────────
+# Route / Directory Discovery (Dynamic)
+# ─────────────────────────────────────────────────────────
+# Instead of brute-forcing a hardcoded wordlist, we discover routes
+# from the website itself:
+#   1. Parse robots.txt — sites list hidden paths here
+#   2. Parse sitemap.xml — lists every page
+#   3. Crawl homepage HTML — extract all <a href> links
+#   4. Probe a small list of known sensitive files (/.env, /.git, etc.)
+
+from urllib.parse import urlparse, urljoin
+
+# Only these are hardcoded — known dangerous files that should NEVER be public
+SENSITIVE_PROBES = [
+    "/.env", "/.git", "/.git/config", "/.htaccess", "/wp-config.php.bak",
+    "/server-status", "/server-info", "/debug", "/console", "/phpmyadmin",
+    "/backup", "/.aws/credentials", "/.DS_Store",
+]
+
+
+async def _fetch_text(session, url: str, timeout: float = 5) -> str:
+    """Fetch a URL and return text, or empty string on failure."""
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout),
+                               allow_redirects=True, ssl=False) as resp:
+            if resp.status == 200:
+                return await resp.text()
+    except Exception:
+        pass
+    return ""
+
+
+async def _paths_from_robots(session, base_url: str) -> List[str]:
+    """Extract Disallow and Allow paths from robots.txt."""
+    text = await _fetch_text(session, f"{base_url}/robots.txt")
+    paths = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith(("Disallow:", "Allow:")):
+            path = line.split(":", 1)[1].strip()
+            if path and path != "/" and "*" not in path:
+                paths.append(path)
+    return paths
+
+
+async def _paths_from_sitemap(session, base_url: str) -> List[str]:
+    """Extract URLs from sitemap.xml."""
+    text = await _fetch_text(session, f"{base_url}/sitemap.xml")
+    paths = []
+    for match in re.finditer(r'<loc>(.*?)</loc>', text):
+        full_url = match.group(1)
+        parsed = urlparse(full_url)
+        if parsed.path and parsed.path != "/":
+            paths.append(parsed.path)
+    return paths[:50]  # Cap to avoid huge sitemaps
+
+
+async def _paths_from_crawl(session, base_url: str) -> List[str]:
+    """Crawl homepage HTML and extract all <a href> links."""
+    text = await _fetch_text(session, base_url)
+    paths = set()
+    base_parsed = urlparse(base_url)
+
+    for match in re.finditer(r'href=["\']([^"\']+)["\']', text, re.IGNORECASE):
+        href = match.group(1)
+
+        # Skip external links, anchors, javascript, mailto
+        if href.startswith(("http://", "https://")):
+            parsed = urlparse(href)
+            if parsed.hostname and parsed.hostname != base_parsed.hostname:
+                continue
+            href = parsed.path
+        elif href.startswith(("#", "javascript:", "mailto:", "tel:")):
+            continue
+
+        if href and href != "/" and not href.startswith("//"):
+            paths.add(href.split("?")[0].split("#")[0])  # Strip query/fragment
+
+    return list(paths)[:50]
+
+
+async def _probe_path(session, base_url: str, path: str) -> Dict | None:
+    """Check if a path exists and return its info."""
+    try:
+        full_url = f"{base_url.rstrip('/')}{path}" if path.startswith("/") else urljoin(base_url, path)
+        async with session.get(full_url, timeout=aiohttp.ClientTimeout(total=5),
+                               allow_redirects=False, ssl=False) as resp:
+            if resp.status in (200, 301, 302, 403):
+                is_sensitive = path in SENSITIVE_PROBES
+                risk = "danger" if is_sensitive and resp.status == 200 else \
+                       "warning" if resp.status == 403 else "info"
+
+                return {
+                    "path": path,
+                    "status": resp.status,
+                    "size": resp.headers.get("Content-Length", "?"),
+                    "risk": risk,
+                    "source": "sensitive_probe" if is_sensitive else "discovered",
+                    "redirect": resp.headers.get("Location", "") if resp.status in (301, 302) else "",
+                }
+    except Exception:
+        pass
+    return None
+
+
+async def discover_routes(url: str) -> Dict[str, Any]:
+    """
+    Dynamic route discovery pipeline:
+      1. robots.txt  → extract disallowed paths
+      2. sitemap.xml → extract all listed pages
+      3. Homepage    → crawl <a href> links
+      4. Sensitive    → probe known dangerous files
+    """
+    all_paths = set()
+    sources = {"robots": 0, "sitemap": 0, "crawl": 0, "sensitive": len(SENSITIVE_PROBES)}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Step 1: robots.txt
+            robot_paths = await _paths_from_robots(session, url)
+            sources["robots"] = len(robot_paths)
+            all_paths.update(robot_paths)
+
+            # Step 2: sitemap.xml
+            sitemap_paths = await _paths_from_sitemap(session, url)
+            sources["sitemap"] = len(sitemap_paths)
+            all_paths.update(sitemap_paths)
+
+            # Step 3: Crawl homepage
+            crawl_paths = await _paths_from_crawl(session, url)
+            sources["crawl"] = len(crawl_paths)
+            all_paths.update(crawl_paths)
+
+            # Step 4: Always probe sensitive files
+            all_paths.update(SENSITIVE_PROBES)
+
+            # Probe all discovered paths
+            found = []
+            for path in sorted(all_paths):
+                result = await _probe_path(session, url, path)
+                if result:
+                    found.append(result)
+
+    except Exception:
+        found = []
+
+    return {
+        "url": url,
+        "routes": found,
+        "total_checked": len(all_paths),
+        "sources": sources,
+    }
 
 
 # ─────────────────────────────────────────────────────────
