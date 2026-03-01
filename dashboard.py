@@ -33,6 +33,14 @@ cancel_event = threading.Event()
 async def run_scan(target_domain, ports, concurrency, timeout):
     """Run the full scan pipeline and emit events to the browser."""
 
+    # Clean up old screenshots to prevent disk buildup on Render
+    for f in os.listdir(SCREENSHOTS_DIR):
+        if f.endswith(".png"):
+            try:
+                os.remove(os.path.join(SCREENSHOTS_DIR, f))
+            except OSError:
+                pass
+
     def stopped():
         return cancel_event.is_set()
 
