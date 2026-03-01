@@ -24,14 +24,6 @@ Dockerfile      ← For deployment
 
 ## Deploy
 
-### Koyeb (Free Tier)
-1. Push your code to GitHub
-2. Go to **[koyeb.com](https://app.koyeb.com/)** → Create Service
-3. Select your GitHub repository
-4. Keep the default Dockerfile builder
-5. Set the Exposed port to **5000**
-6. Deploy! Make sure to use the exact `Dockerfile` provided.
-
 ### Railway (Easiest)
 ```bash
 # Install Railway CLI
