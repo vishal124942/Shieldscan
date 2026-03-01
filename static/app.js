@@ -57,6 +57,16 @@ function startScan() {
         return;
     }
 
+    // Validate: must be a domain name or IP address
+    const domainRegex = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z]{2,})+$/;
+    const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
+    if (!domainRegex.test(target) && !ipRegex.test(target)) {
+        shakeElement(document.getElementById('target'));
+        addFeedItem('cve', '❌ Please enter a valid domain (e.g. example.com) or IP address (e.g. 192.168.1.1)');
+        show('live-feed');
+        return;
+    }
+
     scanning = true;
     openPortCount = 0;
     cveCount = 0;
